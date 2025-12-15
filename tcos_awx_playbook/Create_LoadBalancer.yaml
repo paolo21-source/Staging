@@ -252,7 +252,7 @@
             vip_subnet: "{{ lb_subnet }}"
             vip_address: "{{ lb_ip_address | default(omit) }}"
             description: "{{ lb_description | default(omit) }}"
-            #flavor: "{{ lb_flavor | default(omit) }}"
+            flavor: "{{ lb_flavor | default(omit) }}"
             state: present
             wait: yes
             timeout: 800
