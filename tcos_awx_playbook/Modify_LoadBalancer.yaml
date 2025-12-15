@@ -1227,6 +1227,179 @@
           ignore_errors: yes
 
     # ========================================
+    # AZIONE: DELETE LISTENER
+    # ========================================
+    - name: Delete Listener
+      when: action == 'delete_listener'
+      block:
+        - name: Validate delete listener parameters
+          assert:
+            that:
+              - listener_id is defined
+              - listener_id | length > 0
+              - confirm_delete is defined
+              - confirm_delete | bool
+            fail_msg: " Listener ID obbligatorio e conferma eliminazione richiesta (confirm_delete: true)"
+
+        - name: Log listener deletion
+          debug:
+            msg: " Eliminazione Listener ID: {{ listener_id }}"
+
+        - name: Get Listener info before deletion
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/listeners/{{ listener_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: listener_info_response
+
+        - name: Extract listener details
+          set_fact:
+            listener_name_to_delete: "{{ listener_info_response.json.listener.name | default('Unknown') }}"
+            listener_port_to_delete: "{{ listener_info_response.json.listener.protocol_port | default('') }}"
+
+        - name: Delete Listener via API
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/listeners/{{ listener_id }}"
+            method: DELETE
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 204
+            validate_certs: no
+          register: listener_deleted
+
+        - name: Wait for LB to be ACTIVE after listener deletion
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
+          retries: 30
+          delay: 5
+
+        - name: Log Listener deleted
+          debug:
+            msg: "✓ Listener '{{ listener_name_to_delete }}' (porta {{ listener_port_to_delete }}) eliminato con successo"
+
+        - name: Notify Listener deleted
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "delete"
+              resource:
+                level: "success"
+                message: "✓ Listener '{{ listener_name_to_delete }}' (porta {{ listener_port_to_delete }}) eliminato"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+            validate_certs: no
+          when: manageiq_notification_url is defined
+          ignore_errors: yes
+
+    # ========================================
+    # AZIONE: DELETE POOL
+    # ========================================
+    - name: Delete Pool
+      when: action == 'delete_pool'
+      block:
+        - name: Validate delete pool parameters
+          assert:
+            that:
+              - pool_id is defined
+              - pool_id | length > 0
+              - confirm_delete is defined
+              - confirm_delete | bool
+            fail_msg: " Pool ID obbligatorio e conferma eliminazione richiesta (confirm_delete: true)"
+
+        - name: Log pool deletion
+          debug:
+            msg: " Eliminazione Pool ID: {{ pool_id }}"
+
+        - name: Get Pool info before deletion
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools/{{ pool_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: pool_info_response
+
+        - name: Extract pool details
+          set_fact:
+            pool_name_to_delete: "{{ pool_info_response.json.pool.name | default('Unknown') }}"
+            pool_members_count: "{{ pool_info_response.json.pool.members | default([]) | length }}"
+
+        - name: Check if pool has members
+          debug:
+            msg: " ATTENZIONE: Il pool contiene {{ pool_members_count }} membri che verranno eliminati"
+          when: pool_members_count | int > 0
+
+        - name: Delete Pool via API
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/pools/{{ pool_id }}"
+            method: DELETE
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 204
+            validate_certs: no
+          register: pool_deleted
+
+        - name: Wait for LB to be ACTIVE after pool deletion
+          uri:
+            url: "{{ octavia_url }}/v2.0/lbaas/loadbalancers/{{ loadbalancer_id }}"
+            method: GET
+            headers:
+              X-Auth-Token: "{{ os_auth_token }}"
+            status_code: 200
+            return_content: yes
+            validate_certs: no
+          register: lb_status
+          until: lb_status.json.loadbalancer.provisioning_status == 'ACTIVE'
+          retries: 30
+          delay: 5
+
+        - name: Log Pool deleted
+          debug:
+            msg: "✓ Pool '{{ pool_name_to_delete }}' eliminato con successo"
+
+        - name: Notify Pool deleted
+          uri:
+            url: "{{ manageiq_notification_url }}"
+            method: POST
+            headers:
+              X-Auth-Token: "{{ manageiq_auth_token }}"
+              Content-Type: application/json
+            body:
+              action: "delete"
+              resource:
+                level: "success"
+                message: "✓ Pool '{{ pool_name_to_delete }}' eliminato con successo"
+                subject_type: "User"
+                subject_id: "{{ manageiq_user_id }}"
+            body_format: json
+            status_code: 200
+            timeout: 10
+            validate_certs: no
+          when: manageiq_notification_url is defined
+          ignore_errors: yes
+
+    # ========================================
     # AZIONE: REMOVE MEMBER
     # ========================================
     - name: Remove member from pool
