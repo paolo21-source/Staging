@@ -49,7 +49,7 @@
           - openstack_username is defined
           - openstack_password is defined
           - openstack_project_id is defined or openstack_project_name is defined
-        fail_msg: "⚠️ Credenziali OpenStack mancanti!"
+        fail_msg: " Credenziali OpenStack mancanti!"
 
     - name: Determine authentication method
       set_fact:
@@ -57,7 +57,7 @@
 
     - name: Log authentication
       debug:
-        msg: "🔐 Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
+        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -252,7 +252,7 @@
             vip_subnet: "{{ lb_subnet }}"
             vip_address: "{{ lb_ip_address | default(omit) }}"
             description: "{{ lb_description | default(omit) }}"
-            flavor: "{{ lb_flavor | default(omit) }}"
+            #flavor: "{{ lb_flavor | default(omit) }}"
             state: present
             wait: yes
             timeout: 800
