@@ -13,7 +13,7 @@
     NO_PROXY: "172.16.17.253,10.1.98.150,10.1.98.74,localhost,127.0.0.1,awx.k8s-prod.tcosmilano.local,awx-prod-service.awx.svc,.local"
     
   vars:
-    awx_host: "http://awx-prod-service.awx.svc:80"
+    awx_host: "https://services.linuxwall.it"
     awx_validate_certs: false
     retention_days: 15
   vars_files:
