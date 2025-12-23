@@ -465,19 +465,21 @@
 
     # =============================================
     # 7.1 IDENTIFICA BACKUP PADRE
-    # Un backup è "padre" se has_dependent_backups=true o se è un full backup senza parent
+    # Un backup è "padre" se:
+    # - NON ha parent_id (è un backup FULL, non incrementale)
+    # Quindi tutti i backup FULL sono potenziali padri, anche se non hanno ancora figli
     # =============================================
 
     - name: Initialize parent backups list
       set_fact:
         parent_backups: []
 
-    - name: Identify parent backups
+    - name: Identify parent backups (FULL backups = no parent_id)
       set_fact:
         parent_backups: "{{ parent_backups + [item] }}"
       loop: "{{ sorted_existing_backups }}"
       when:
-        - item.has_dependent_backups is defined and item.has_dependent_backups | bool
+        - item.parent_id is not defined or item.parent_id == None or item.parent_id == ''
         - item.created_at is defined
 
     - name: Sort parent backups by creation date (newest first)
