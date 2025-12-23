@@ -165,7 +165,7 @@
         backup_force_flag: "{{ (volume_response.json.volume.attachments | length > 0) }}"
 
     # =============================================
-    # 7. ANALISI BACKUP PADRE/FIGLI (CORRETTA)
+    # 7. ANALISI BACKUP PADRE/FIGLI (FIXED LOGIC)
     # =============================================
     - name: Get all backups for this volume
       uri:
@@ -183,28 +183,27 @@
       set_fact:
         sorted_parent_backups: "{{ volume_existing_backups | rejectattr('is_incremental', 'equalto', true) | sort(attribute='created_at', reverse=True) | list }}"
 
-    - name: Analyze newest parent and count ITS specific children
+    - name: Set flags for first backup
       set_fact:
         is_first_backup: "{{ sorted_parent_backups | length == 0 }}"
 
-    - name: Count children ONLY for the newest parent
+    - name: Count children logic (GT newest parent date)
       set_fact:
-        newest_parent_id: "{{ sorted_parent_backups[0].id }}"
-        current_children_count: "{{ volume_existing_backups | selectattr('is_incremental', 'equalto', true) | selectattr('parent_id', 'defined') | selectattr('parent_id', 'equalto', sorted_parent_backups[0].id) | list | length }}"
+        # Conta gli incrementali creati dopo la data del FULL più recente
+        current_children_count: "{{ volume_existing_backups | selectattr('is_incremental', 'equalto', true) | selectattr('created_at', 'gt', sorted_parent_backups[0].created_at) | list | length }}"
       when: not is_first_backup
 
     - name: Decide backup type
       set_fact:
         is_incremental: "{{ not is_first_backup and (current_children_count | int < 6) }}"
-        last_backup_id: "{{ newest_parent_id | default('') }}"
-        backup_decision_reason: "{{ 'Padre ' ~ newest_parent_id[:8] ~ ' ha ' ~ current_children_count ~ ' figli (< 6) -> INCREMENTALE' if (not is_first_backup and current_children_count | int < 6) else 'Nessun padre o limite 6 figli raggiunto -> FULL' }}"
+        backup_decision_reason: "{{ 'Padre ha ' ~ current_children_count ~ ' figli (< 6) -> INCREMENTALE' if (not is_first_backup and current_children_count | int < 6) else 'Nessun padre o limite raggiunto -> FULL' }}"
 
     - name: Display backup decision
       debug:
         msg: "DECISIONE: {{ 'INCREMENTALE' if is_incremental else 'FULL' }} | Motivo: {{ backup_decision_reason }}"
 
     # =============================================
-    # 8. CREA BACKUP (API REST)
+    # 8. CREA BACKUP (API REST - FIXED FOR 400 ERRORS)
     # =============================================
     - name: Generate final backup name
       set_fact:
@@ -224,7 +223,7 @@
             description: "Backup {{ 'INC' if is_incremental else 'FULL' }} - Tenant: {{ tenant_name }}"
             force: "{{ backup_force_flag }}"
             incremental: "{{ is_incremental }}"
-            parent_id: "{{ last_backup_id if is_incremental else omit }}"
+            # RIMOSSO parent_id per evitare errore 400. Cinder lo associa in automatico.
         body_format: json
         status_code: [202]
         validate_certs: no
