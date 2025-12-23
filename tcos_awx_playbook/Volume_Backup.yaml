@@ -769,6 +769,63 @@
         - backup_timestamp | int < max_retention_timestamp | int
 
     # =============================================
+    # 10.2.1 AL 21° GIORNO: ELIMINA PRIMA SETTIMANA (GIORNI 1-7)
+    # Quando raggiungiamo il 21° giorno di backup, eliminiamo tutta la prima settimana
+    # =============================================
+
+    - name: Calculate first week timestamp range (day 1-7 from oldest backup)
+      block:
+        - name: Get oldest backup timestamp
+          set_fact:
+            oldest_backup_timestamp: "{{ (sorted_backups_retention[0].created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
+          when: sorted_backups_retention | length > 0
+
+        - name: Calculate first week end timestamp (7 days after oldest)
+          set_fact:
+            first_week_end_timestamp: "{{ (oldest_backup_timestamp | int + (first_week_days | int * 86400)) }}"
+          when: oldest_backup_timestamp is defined
+
+        - name: Calculate backup age in days
+          set_fact:
+            backup_age_days: "{{ ((ansible_date_time.epoch | int - oldest_backup_timestamp | int) / 86400) | int }}"
+          when: oldest_backup_timestamp is defined
+
+        - name: Check if we reached day 21 (trigger first week cleanup)
+          set_fact:
+            trigger_first_week_cleanup: "{{ backup_age_days | int >= retention_days | int }}"
+          when: backup_age_days is defined
+
+        - name: Identify first week backups (days 1-7) for deletion
+          set_fact:
+            backups_to_delete: "{{ backups_to_delete + [item] }}"
+          loop: "{{ sorted_backups_retention }}"
+          vars:
+            backup_timestamp: "{{ (item.created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
+          when:
+            - trigger_first_week_cleanup is defined
+            - trigger_first_week_cleanup | bool
+            - item.created_at is defined
+            - backup_timestamp | int <= first_week_end_timestamp | int
+            - item not in backups_to_delete
+
+        - name: Display first week cleanup info
+          debug:
+            msg:
+              - "=============================================="
+              - "PULIZIA PRIMA SETTIMANA (GIORNI 1-7)"
+              - "=============================================="
+              - "Età backup più vecchio: {{ backup_age_days }} giorni"
+              - "Soglia retention: {{ retention_days }} giorni"
+              - "Trigger pulizia prima settimana: {{ 'SÌ' if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 'NO' }}"
+              - "---"
+              - "Backup prima settimana identificati: {{ (backups_to_delete | selectattr('created_at', 'defined') | list | length) if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 0 }}"
+              - "=============================================="
+          when:
+            - backup_age_days is defined
+            - trigger_first_week_cleanup is defined
+      when: sorted_backups_retention | length > 0
+
+    # =============================================
     # 10.3 SE CREIAMO FULL E ABBIAMO >= 3 PADRI, ELIMINA IL PIÙ VECCHIO
     # =============================================
 
@@ -828,6 +885,7 @@
           - "=============================================="
           - "Retention massima: {{ retention_days }} giorni"
           - "Limite backup padre: 3"
+          - "Pulizia prima settimana (giorni 1-7): {{ 'ATTIVA al giorno ' ~ retention_days if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 'Non ancora attiva' }}"
           - "---"
           - "Backup totali per questo volume: {{ volume_backups_retention | length }}"
           - "Backup padre totali: {{ sorted_parent_backups_retention | length }}"
@@ -895,5 +953,6 @@
           - "RETENTION POLICY:"
           - "Massimo {{ retention_days }} giorni di retention"
           - "Massimo 3 backup padre mantenuti"
+          - "Al giorno {{ retention_days }}: elimina prima settimana (giorni 1-{{ first_week_days }})"
           - "Logica incrementale: < 6 figli -> incrementale, >= 6 figli -> full"
           - "=============================================="
