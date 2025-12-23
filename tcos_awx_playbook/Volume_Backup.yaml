@@ -539,24 +539,29 @@
     - name: Analyze newest parent backup for incremental decision
       when: not is_first_backup
       block:
+        - name: Check if we have parent backups with children
+          set_fact:
+            has_parent_backups: "{{ parent_with_children | length > 0 }}"
+
         - name: Get newest parent backup details
           set_fact:
-            newest_parent: "{{ parent_with_children[0] if parent_with_children | length > 0 else None }}"
+            newest_parent: "{{ parent_with_children[0] }}"
+          when: has_parent_backups | bool
 
         - name: Decide backup type based on children count
           set_fact:
-            is_incremental: "{{ newest_parent.children_count < 6 if newest_parent is not none else false }}"
-            children_count: "{{ newest_parent.children_count if newest_parent is not none else 0 }}"
-            last_backup_id: "{{ newest_parent.parent.id if newest_parent is not none else '' }}"
-            backup_decision_reason: "{{ 'Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (< 6) -> INCREMENTALE' if (newest_parent is not none and newest_parent.children_count < 6) else ('Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (>= 6) -> FULL' if newest_parent is not none else 'Nessun backup padre trovato -> FULL') }}"
-          when: newest_parent is not none
+            is_incremental: "{{ newest_parent.children_count < 6 }}"
+            children_count: "{{ newest_parent.children_count }}"
+            last_backup_id: "{{ newest_parent.parent.id }}"
+            backup_decision_reason: "{{ 'Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (< 6) -> INCREMENTALE' if newest_parent.children_count < 6 else 'Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (>= 6) -> FULL' }}"
+          when: has_parent_backups | bool
 
         - name: Force FULL backup if no parent found but backups exist
           set_fact:
             is_incremental: false
             last_backup_id: ""
             backup_decision_reason: "Backup esistenti ma nessun padre identificato -> FULL"
-          when: newest_parent is none and sorted_existing_backups | length > 0
+          when: not (has_parent_backups | bool) and sorted_existing_backups | length > 0
 
     - name: Display backup decision
       debug:
