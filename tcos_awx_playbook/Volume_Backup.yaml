@@ -2,7 +2,7 @@
 # ============================================
 # Playbook AWX: Cinder Volume Backup (One-Shot) - MULTI-TENANT
 # Eseguito dallo schedule per fare backup automatici
-# VERSIONE CON API REST (no openstack.cloud)
+# VERSIONE CORRETTA: Logica 1 FULL + 6 INCREMENTALI
 # ============================================
 
 - name: Create Cinder Volume Backup
@@ -24,7 +24,6 @@
     # =============================================
     # 1. VALIDAZIONE INPUT
     # =============================================
-    
     - name: Validate required variables
       assert:
         that:
@@ -32,23 +31,14 @@
           - tenant_name is defined and tenant_name | length > 0
           - retention_days is defined
           - openstack_auth_url is defined
-          - openstack_username is defined
-          - openstack_password is defined
-          - (openstack_project_id is defined) or (openstack_project_name is defined)
         fail_msg: "ERROR: Missing required variables"
-        success_msg: "✓ Variables OK - volume_id: {{ volume_id }}, tenant: {{ tenant_name }}"
-    
+
     # =============================================
-    # 2. AUTHENTICATE OPENSTACK KEYSTONE (MULTI-TENANT)
+    # 2. AUTHENTICATE OPENSTACK (MULTI-TENANT)
     # =============================================
-    
     - name: Determine authentication method
       set_fact:
         use_project_id: "{{ openstack_project_id is defined and openstack_project_id != '' }}"
-
-    - name: Log authentication
-      debug:
-        msg: " Autenticazione OpenStack: {{ 'Project ID (UUID)' if use_project_id else 'Project Name' }} = {{ openstack_project_id if use_project_id else openstack_project_name }}"
 
     - name: Authenticate with project ID
       uri:
@@ -61,17 +51,14 @@
               password:
                 user:
                   name: "{{ openstack_username }}"
-                  domain:
-                    name: "{{ openstack_domain_name | default('Default') }}"
+                  domain: { name: "{{ openstack_domain_name | default('Default') }}" }
                   password: "{{ openstack_password }}"
             scope:
-              project:
-                id: "{{ openstack_project_id }}"
+              project: { id: "{{ openstack_project_id }}" }
         body_format: json
         status_code: [201, 401, 404]
         return_content: yes
         validate_certs: no
-        timeout: 10
       register: auth_with_id
       when: use_project_id | bool
       ignore_errors: yes
@@ -87,879 +74,198 @@
               password:
                 user:
                   name: "{{ openstack_username }}"
-                  domain:
-                    name: "{{ openstack_domain_name | default('Default') }}"
+                  domain: { name: "{{ openstack_domain_name | default('Default') }}" }
                   password: "{{ openstack_password }}"
             scope:
               project:
                 name: "{{ openstack_project_name }}"
-                domain:
-                  name: "{{ openstack_domain_name | default('Default') }}"
+                domain: { name: "{{ openstack_domain_name | default('Default') }}" }
         body_format: json
         status_code: [201, 401, 404]
         return_content: yes
         validate_certs: no
-        timeout: 10
       register: auth_with_name
       when: not (use_project_id | bool)
       ignore_errors: yes
 
     - name: Set unified auth response
       set_fact:
-        auth_response: "{{ auth_with_id if (auth_with_id is defined and not auth_with_id.skipped | default(false)) else auth_with_name }}"
-      when:
-        - (auth_with_id is defined and auth_with_id.status is defined and auth_with_id.status == 201) or
-          (auth_with_name is defined and auth_with_name.status is defined and auth_with_name.status == 201)
-
-    - name: Check if authentication failed (tenant not found)
-      set_fact:
-        tenant_exists: false
-      when:
-        - auth_response is not defined or
-          (auth_with_id is defined and auth_with_id.status is defined and auth_with_id.status != 201) or
-          (auth_with_name is defined and auth_with_name.status is defined and auth_with_name.status != 201)
-
-    - name: Set tenant exists flag if auth succeeded
-      set_fact:
-        tenant_exists: true
-      when: auth_response is defined
+        auth_response: "{{ auth_with_id if (use_project_id | bool) else auth_with_name }}"
+      when: (auth_with_id is defined and auth_with_id.status == 201) or (auth_with_name is defined and auth_with_name.status == 201)
 
     - name: Handle non-existent tenant
-      when: tenant_exists is defined and not tenant_exists
+      when: auth_response is not defined
       block:
         - name: Log missing tenant
-          debug:
-            msg:
-              - "=============================================="
-              - "⚠ TENANT NON TROVATO"
-              - "=============================================="
-              - "Tenant: {{ tenant_name }}"
-              - "Project ID: {{ openstack_project_id | default('N/A') }}"
-              - "Project Name: {{ openstack_project_name | default('N/A') }}"
-              - "---"
-              - "Il tenant è stato probabilmente eliminato."
-              - "Il backup schedule verrà eliminato automaticamente."
-              - "=============================================="
-
-        - name: Get all schedules from AWX for tenant cleanup
+          debug: { msg: "⚠ TENANT NON TROVATO. Pulizia schedule AWX..." }
+        - name: Get all schedules from AWX
           uri:
             url: "{{ awx_host }}/api/v2/schedules/"
             method: GET
             url_username: "{{ awx_user }}"
             url_password: "{{ awx_password }}"
             force_basic_auth: yes
-            validate_certs: "{{ awx_validate_certs | default('no') }}"
-            return_content: yes
-            timeout: 30
+            validate_certs: no
           register: awx_schedules_tenant
-          ignore_errors: yes
-
-        - name: Filter schedules for this tenant
-          set_fact:
-            tenant_schedules: "{{ awx_schedules_tenant.json.results | selectattr('name', 'search', tenant_name) | list }}"
-          when:
-            - awx_schedules_tenant is succeeded
-            - awx_schedules_tenant.json.results is defined
-
-        - name: Delete all schedules for non-existent tenant
+        - name: Delete schedules for missing tenant
           uri:
             url: "{{ awx_host }}/api/v2/schedules/{{ item.id }}/"
             method: DELETE
             url_username: "{{ awx_user }}"
             url_password: "{{ awx_password }}"
             force_basic_auth: yes
-            validate_certs: "{{ awx_validate_certs }}"
             status_code: [204, 404]
-            timeout: 10
-          loop: "{{ tenant_schedules }}"
-          when: tenant_schedules is defined and tenant_schedules | length > 0
-          register: tenant_schedule_delete_results
-          ignore_errors: yes
+          loop: "{{ awx_schedules_tenant.json.results | selectattr('name', 'search', tenant_name) | list }}"
+        - meta: end_play
 
-        - name: Log tenant schedules deletion
-          debug:
-            msg: "✓ Eliminati {{ tenant_schedules | length }} schedule(s) per tenant non esistente: {{ tenant_name }}"
-          when: tenant_schedules is defined and tenant_schedules | length > 0
-
-        - name: End playbook - tenant not found
-          meta: end_play
-
-    - name: Extract auth token
+    - name: Extract auth facts
       set_fact:
         os_auth_token: "{{ auth_response.x_subject_token }}"
-
-    - name: Log successful authentication
-      debug:
-        msg: "✓ Autenticato su OpenStack | Tenant: {{ tenant_name }}"
-    
-    # =============================================
-    # 3. ESTRAI E CORREGGI ENDPOINT CINDER
-    # =============================================
-    
-    - name: Extract Cinder endpoint from service catalog
-      set_fact:
         cinder_endpoint: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
-        
-    #- name: Fix Cinder endpoint to use correct IP
-     # set_fact:
-      #  cinder_endpoint: "{{ cinder_endpoint_original | regex_replace('172\\.16\\.17\\.253', '10.1.98.150') | regex_replace('https://region-milano\\.linuxwall\\.it', 'https://10.1.98.150') }}"
-      
-    #- name: Log Cinder endpoint
-     # debug:
-     #   msg: 
-      #    - "Cinder endpoint originale: {{ cinder_endpoint_original }}"
-       #   - "Cinder endpoint corretto: {{ cinder_endpoint }}"
-    
+
     # =============================================
-    # 4. VERIFICA ESISTENZA VOLUME (API REST)
+    # 4. VERIFICA ESISTENZA VOLUME
     # =============================================
-    
     - name: Check if volume exists via Cinder API
+      uri:
+        url: "{{ cinder_endpoint }}/volumes/{{ volume_id }}"
+        method: GET
+        headers: { X-Auth-Token: "{{ os_auth_token }}" }
+        validate_certs: no
+        status_code: [200, 404]
+      register: volume_response
+
+    - name: Handle non-existent volume
+      when: volume_response.status == 404
       block:
-        - name: Get volume info via Cinder API
+        - name: Log missing volume
+          debug: { msg: "⚠ VOLUME NON TROVATO. Pulizia schedule AWX..." }
+        - name: Get schedules for volume
           uri:
-            url: "{{ cinder_endpoint }}/volumes/{{ volume_id }}"
+            url: "{{ awx_host }}/api/v2/schedules/"
             method: GET
-            headers:
-              X-Auth-Token: "{{ os_auth_token }}"
-              Accept: "application/json"
-            validate_certs: no
-            status_code: [200, 404]
-            timeout: 10
-          register: volume_response
-        
-        - name: Set volume data from API response
-          set_fact:
-            volume_exists: "{{ volume_response.status == 200 }}"
-            volume_name: "{{ volume_response.json.volume.name if volume_response.status == 200 else (backup_name | default('volume_' ~ volume_id[:8])) }}"
+            url_username: "{{ awx_user }}"
+            url_password: "{{ awx_password }}"
+            force_basic_auth: yes
+          register: awx_schedules_vol
+        - name: Delete schedules for missing volume
+          uri:
+            url: "{{ awx_host }}/api/v2/schedules/{{ item.id }}/"
+            method: DELETE
+            url_username: "{{ awx_user }}"
+            url_password: "{{ awx_password }}"
+            force_basic_auth: yes
+            status_code: [204, 404]
+          loop: "{{ awx_schedules_vol.json.results | selectattr('name', 'search', volume_id) | list }}"
+        - meta: end_play
 
-        - name: Check volume attachment status
-          set_fact:
-            volume_attachments: "{{ volume_response.json.volume.attachments if volume_response.status == 200 else [] }}"
-            volume_is_attached: "{{ (volume_response.json.volume.attachments | length > 0) if volume_response.status == 200 else false }}"
-            backup_force_flag: "{{ (volume_response.json.volume.attachments | length > 0) if volume_response.status == 200 else true }}"
-          when: volume_exists
-
-        - name: Display volume attachment info
-          debug:
-            msg:
-              - "=============================================="
-              - "VOLUME ATTACHMENT STATUS"
-              - "=============================================="
-              - "Volume: {{ volume_name }}"
-              - "Status: {{ 'ATTACHED' if volume_is_attached else 'DETACHED' }}"
-              - "{% if volume_is_attached %}Attached to: {{ volume_attachments[0].server_id if volume_attachments | length > 0 else 'N/A' }}{% endif %}"
-              - "Backup flag --force: {{ backup_force_flag }}"
-              - "---"
-              - "Motivo: {{ 'Volume in uso, richiede --force per backup' if volume_is_attached else 'Volume non in uso, backup senza --force' }}"
-              - "=============================================="
-          when: volume_exists
-
-        - name: Exit if volume doesn't exist
-          when: not volume_exists
-          block:
-            - name: Log missing volume
-              debug:
-                msg:
-                  - "=============================================="
-                  - " VOLUME NON TROVATO"
-                  - "=============================================="
-                  - "Volume ID: {{ volume_id }}"
-                  - "Tenant: {{ tenant_name }}"
-                  - "---"
-                  - "Il volume è stato probabilmente eliminato."
-                  - "Il backup schedule dovrebbe essere disabilitato."
-                  - "Uscita senza errori per non bloccare lo schedule."
-                  - "=============================================="
-            
-            # =============================================
-            # RECUPERA SCHEDULE ID DA AWX (se volume eliminato)
-            # =============================================
-            
-            - name: Retrieve AWX schedule for this volume (if needed for disable)
-
-              block:
-                - name: Get all schedules from AWX
-                  uri:
-                    url: "{{ awx_host }}/api/v2/schedules/"
-                    method: GET
-                    url_username: "{{ awx_user }}"
-                    url_password: "{{ awx_password }}"
-                    force_basic_auth: yes
-                    validate_certs: "{{ awx_validate_certs | default('no') }}"
-                    return_content: yes
-                    timeout: 30
-                  register: awx_schedules
-                  ignore_errors: yes
-
-                - name: Filter schedules for this volume
-                  set_fact:
-                    volume_schedules: "{{ awx_schedules.json.results | selectattr('name', 'search', volume_id) | list }}"
-                  when: 
-                    - awx_schedules is succeeded
-                    - awx_schedules.json.results is defined
-
-                - name: Filter active schedules for this volume
-                  set_fact:
-                    active_schedules: "{{ volume_schedules | selectattr('enabled', 'equalto', true) | list }}"
-                  when: volume_schedules is defined
-
-                - name: Set schedule ID from first active schedule
-                  set_fact:
-                    awx_schedule_id: "{{ active_schedules[0].id }}"
-                  when: 
-                    - active_schedules is defined
-                    - active_schedules | length > 0
-
-                - name: Set schedule ID from first schedule (even if disabled)
-                  set_fact:
-                    awx_schedule_id: "{{ volume_schedules[0].id }}"
-                  when: 
-                    - awx_schedule_id is not defined
-                    - volume_schedules is defined
-                    - volume_schedules | length > 0
-
-                - name: Log schedule found
-                  debug:
-                    msg: 
-                      - "✓ Schedule AWX trovato per volume {{ volume_id }}"
-                      - "  Schedule ID: {{ awx_schedule_id }}"
-                      - "  Schedules totali: {{ volume_schedules | length }}"
-                      - "  Schedules attivi: {{ active_schedules | length }}"
-                  when: 
-                    - awx_schedule_id is defined
-                    - awx_schedule_id != ''
-
-                - name: Log no schedule found
-                  debug:
-                    msg: "⚠ Nessuno schedule AWX trovato per volume {{ volume_id }} - skip disable"
-                  when: awx_schedule_id is not defined or awx_schedule_id == ''
-            
-            - name: Delete AWX schedule for deleted volume
-              uri:
-                url: "{{ awx_host }}/api/v2/schedules/{{ awx_schedule_id }}/"
-                method: DELETE
-                url_username: "{{ awx_user }}"
-                url_password: "{{ awx_password }}"
-                force_basic_auth: yes
-                validate_certs: "{{ awx_validate_certs }}"
-                status_code: [204, 404]
-                timeout: 10
-              when: awx_schedule_id is defined and awx_schedule_id != ''
-              register: schedule_delete_result
-              ignore_errors: yes
-
-            - name: Log schedule deletion success
-              debug:
-                msg: "✓ Schedule AWX eliminato automaticamente (ID: {{ awx_schedule_id | default('N/A') }})"
-              when:
-                - schedule_delete_result is defined
-                - schedule_delete_result is succeeded
-
-            - name: Log schedule deletion failure
-              debug:
-                msg: "⚠ Impossibile eliminare schedule AWX - verifica manualmente"
-              when:
-                - schedule_delete_result is defined
-                - schedule_delete_result is failed
-   
-            - name: End playbook successfully (volume doesn't exist)
-              meta: end_play
-        
-        - name: Display success - volume found
-          debug:
-            msg: "✓ Volume trovato in OpenStack: {{ volume_name }} ({{ volume_id }})"
-          when: volume_exists
-      
-      rescue:
-        - name: Handle Cinder API error
-          debug:
-            msg: " Errore accesso Cinder API - impossibile verificare esistenza volume"
-        
-        - name: Use fallback volume name
-          set_fact:
-            volume_name: "{{ backup_name | default('volume_' ~ volume_id[:8]) }}"
-            volume_exists: true
-    
-    # =============================================
-    # 5. GENERA NOME BACKUP FINALE
-    # Format: anno_mese_giorno_nome_backup_tenant
-    # =============================================
-    
-    - name: Generate date prefix
+    - name: Set volume facts
       set_fact:
-        date_prefix: "{{ ansible_date_time.year }}_{{ '%02d' | format(ansible_date_time.month | int) }}_{{ '%02d' | format(ansible_date_time.day | int) }}"
-    
-    - name: Clean tenant name
-      set_fact:
-        clean_tenant_name: "{{ tenant_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
-    
-    - name: Check if custom backup_name is provided
-      set_fact:
-        has_backup_name: "{{ backup_name is defined and backup_name | length > 0 }}"
-    
-    - name: Use custom backup name if provided
-      set_fact:
-        clean_backup_name: "{{ backup_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
-      when: has_backup_name
-    
-    - name: Generate default backup name from volume if not provided
-      set_fact:
-        clean_backup_name: "backup_{{ volume_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
-      when: not has_backup_name
-    
-    - name: Compose final backup name (date + name + tenant)
-      set_fact:
-        final_backup_name: "{{ date_prefix }}_{{ clean_backup_name }}_{{ clean_tenant_name }}"
-    
-    # =============================================
-    # 6. DISPLAY INFO
-    # =============================================
-    
-    - name: Display backup info
-      debug:
-        msg:
-          - "=============================================="
-          - "INIZIO BACKUP (MULTI-TENANT)"
-          - "=============================================="
-          - "Volume ID: {{ volume_id }}"
-          - "Volume Name: {{ volume_name }}"
-          - "Tenant: {{ tenant_name }}"
-          - "---"
-          - "Nome backup finale: {{ final_backup_name }}"
-          - "  - Data: {{ date_prefix }}"
-          - "  - Nome: {{ clean_backup_name }}"
-          - "  - Tenant: {{ clean_tenant_name }}"
-          - "---"
-          - "Retention: {{ retention_days }} giorni"
-          - "=============================================="
-    
-    # =============================================
-    # 7. ANALISI BACKUP PADRE/FIGLI E DECISIONE TIPO BACKUP
-    # Logica avanzata:
-    # - Massimo 3 backup padre
-    # - Se backup padre ha 6 figli -> crea nuovo full
-    # - Se backup padre ha < 6 figli -> crea incrementale
-    # - Elimina backup padre più vecchio se > 21 giorni
-    # =============================================
+        volume_name: "{{ volume_response.json.volume.name }}"
+        backup_force_flag: "{{ (volume_response.json.volume.attachments | length > 0) }}"
 
-    - name: Get all backups for this volume via Cinder API
+    # =============================================
+    # 7. ANALISI BACKUP PADRE/FIGLI (CORRETTA)
+    # =============================================
+    - name: Get all backups for this volume
       uri:
         url: "{{ cinder_endpoint }}/backups/detail"
         method: GET
-        headers:
-          X-Auth-Token: "{{ os_auth_token }}"
-          Accept: "application/json"
+        headers: { X-Auth-Token: "{{ os_auth_token }}" }
         validate_certs: no
-        status_code: [200]
-        timeout: 10
       register: existing_backups_response
 
-    - name: Filter backups for this volume (only available status)
+    - name: Filter available backups
       set_fact:
         volume_existing_backups: "{{ existing_backups_response.json.backups | selectattr('volume_id', 'equalto', volume_id) | selectattr('status', 'equalto', 'available') | list }}"
 
-    - name: Sort backups by creation date (newest first)
+    - name: Sort parent backups (FULL) newest first
       set_fact:
-        sorted_existing_backups: "{{ volume_existing_backups | sort(attribute='created_at', reverse=True) }}"
+        sorted_parent_backups: "{{ volume_existing_backups | rejectattr('is_incremental', 'equalto', true) | sort(attribute='created_at', reverse=True) | list }}"
 
-    # =============================================
-    # 7.1 IDENTIFICA BACKUP PADRE
-    # Un backup è "padre" se:
-    # - NON ha parent_id (è un backup FULL, non incrementale)
-    # Quindi tutti i backup FULL sono potenziali padri, anche se non hanno ancora figli
-    # =============================================
-
-    - name: Initialize parent backups list
+    - name: Analyze newest parent and count ITS specific children
       set_fact:
-        parent_backups: []
+        is_first_backup: "{{ sorted_parent_backups | length == 0 }}"
 
-    - name: Identify parent backups (FULL backups = is_incremental false)
+    - name: Count children ONLY for the newest parent
       set_fact:
-        parent_backups: "{{ parent_backups + [item] }}"
-      loop: "{{ sorted_existing_backups }}"
-      when:
-        - item.is_incremental is defined
-        - not (item.is_incremental | bool)
-        - item.created_at is defined
-
-    - name: Sort parent backups by creation date (newest first)
-      set_fact:
-        sorted_parent_backups: "{{ parent_backups | sort(attribute='created_at', reverse=True) }}"
-
-    - name: Display parent backups info
-      debug:
-        msg:
-          - "=============================================="
-          - "ANALISI BACKUP PADRE"
-          - "=============================================="
-          - "Backup totali disponibili: {{ sorted_existing_backups | length }}"
-          - "Backup PADRE trovati: {{ sorted_parent_backups | length }}"
-          - "Limite massimo backup padre: 3"
-          - "=============================================="
-
-    # =============================================
-    # 7.2 CONTA FIGLI PER OGNI BACKUP PADRE
-    # =============================================
-
-    - name: Initialize parent backup analysis
-      set_fact:
-        parent_with_children: []
-
-    - name: Count children for each parent backup
-      set_fact:
-        parent_with_children: "{{ parent_with_children + [{ 'parent': item, 'children_count': (sorted_existing_backups | selectattr('is_incremental', 'defined') | selectattr('is_incremental', 'equalto', true) | list | length) }] }}"
-      loop: "{{ sorted_parent_backups }}"
-
-    - name: Display parent-children relationships
-      debug:
-        msg:
-          - "=============================================="
-          - "RELAZIONI PADRE-FIGLI"
-          - "=============================================="
-          - "{% for pc in parent_with_children %}Parent: {{ pc.parent.name[:40] }} | ID: {{ pc.parent.id[:8] }} | Figli: {{ pc.children_count }} | Data: {{ pc.parent.created_at }}\n{% endfor %}"
-          - "=============================================="
-      when: parent_with_children | length > 0
-
-    # =============================================
-    # 7.3 DETERMINA TIPO BACKUP DA CREARE
-    # Logica:
-    # - Se NON esistono backup -> FULL
-    # - Se il backup padre più recente ha >= 6 figli -> FULL
-    # - Se il backup padre più recente ha < 6 figli -> INCREMENTALE
-    # =============================================
-
-    - name: Check if first backup (no existing backups)
-      set_fact:
-        is_first_backup: "{{ sorted_existing_backups | length == 0 }}"
-
-    - name: Set default backup type to FULL for first backup
-      set_fact:
-        is_incremental: false
-        backup_decision_reason: "Primo backup per questo volume"
-      when: is_first_backup
-
-    - name: Analyze newest parent backup for incremental decision
+        newest_parent_id: "{{ sorted_parent_backups[0].id }}"
+        current_children_count: "{{ volume_existing_backups | selectattr('is_incremental', 'equalto', true) | selectattr('parent_id', 'defined') | selectattr('parent_id', 'equalto', sorted_parent_backups[0].id) | list | length }}"
       when: not is_first_backup
-      block:
-        - name: Check if we have parent backups with children
-          set_fact:
-            has_parent_backups: "{{ parent_with_children | length > 0 }}"
 
-        - name: Get newest parent backup details
-          set_fact:
-            newest_parent: "{{ parent_with_children[0] }}"
-          when: has_parent_backups | bool
-
-        - name: Decide backup type based on children count
-          set_fact:
-            is_incremental: "{{ newest_parent.children_count < 6 }}"
-            children_count: "{{ newest_parent.children_count }}"
-            last_backup_id: "{{ newest_parent.parent.id }}"
-            backup_decision_reason: "{{ 'Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (< 6) -> INCREMENTALE' if newest_parent.children_count < 6 else 'Backup padre più recente ha ' ~ newest_parent.children_count ~ ' figli (>= 6) -> FULL' }}"
-          when: has_parent_backups | bool
-
-        - name: Force FULL backup if no parent found but backups exist
-          set_fact:
-            is_incremental: false
-            last_backup_id: ""
-            backup_decision_reason: "Backup esistenti ma nessun padre identificato -> FULL"
-          when: not (has_parent_backups | bool) and sorted_existing_backups | length > 0
+    - name: Decide backup type
+      set_fact:
+        is_incremental: "{{ not is_first_backup and (current_children_count | int < 6) }}"
+        last_backup_id: "{{ newest_parent_id | default('') }}"
+        backup_decision_reason: "{{ 'Padre ' ~ newest_parent_id[:8] ~ ' ha ' ~ current_children_count ~ ' figli (< 6) -> INCREMENTALE' if (not is_first_backup and current_children_count | int < 6) else 'Nessun padre o limite 6 figli raggiunto -> FULL' }}"
 
     - name: Display backup decision
       debug:
-        msg:
-          - "=============================================="
-          - "DECISIONE TIPO BACKUP"
-          - "=============================================="
-          - "Tipo backup da creare: {{ 'INCREMENTALE' if is_incremental else 'FULL' }}"
-          - "Motivo: {{ backup_decision_reason }}"
-          - "Parent backup ID: {{ last_backup_id if is_incremental and last_backup_id != '' else 'N/A' }}"
-          - "{% if is_incremental and last_backup_id != '' %}Figli attuali del parent: {{ children_count }}{% endif %}"
-          - "=============================================="
+        msg: "DECISIONE: {{ 'INCREMENTALE' if is_incremental else 'FULL' }} | Motivo: {{ backup_decision_reason }}"
 
     # =============================================
     # 8. CREA BACKUP (API REST)
-    # Conforme a OpenStack Cinder Backup API:
-    # - FULL backup: incremental=false
-    # - INCREMENTAL backup: incremental=true, parent_id=<parent_backup_id>
-    # - Flag --force: true se volume ATTACHED, false se DETACHED
-    # Ref: https://docs.openstack.org/cinder/latest/admin/volume-backups.html
     # =============================================
+    - name: Generate final backup name
+      set_fact:
+        final_backup_name: "{{ ansible_date_time.year }}_{{ '%02d' | format(ansible_date_time.month | int) }}_{{ '%02d' | format(ansible_date_time.day | int) }}_{{ volume_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}_{{ tenant_name | regex_replace('[^a-zA-Z0-9_-]', '_') }}"
 
-    - name: Create FULL volume backup via Cinder API
+    - name: Create volume backup via Cinder API
       uri:
         url: "{{ cinder_endpoint }}/backups"
         method: POST
         headers:
           X-Auth-Token: "{{ os_auth_token }}"
           Content-Type: "application/json"
-          Accept: "application/json"
         body:
           backup:
             volume_id: "{{ volume_id }}"
             name: "{{ final_backup_name }}"
-            description: "Backup automatico FULL - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }} - {{ 'Volume ATTACHED (forced)' if backup_force_flag else 'Volume DETACHED' }}"
+            description: "Backup {{ 'INC' if is_incremental else 'FULL' }} - Tenant: {{ tenant_name }}"
             force: "{{ backup_force_flag }}"
-            incremental: false
+            incremental: "{{ is_incremental }}"
+            parent_id: "{{ last_backup_id if is_incremental else omit }}"
         body_format: json
-        validate_certs: no
         status_code: [202]
-        timeout: 10
+        validate_certs: no
       register: backup_create_response
-      when: not is_incremental
 
-    - name: Create INCREMENTAL volume backup via Cinder API
+    - name: Wait for backup completion
       uri:
-        url: "{{ cinder_endpoint }}/backups"
-        method: POST
-        headers:
-          X-Auth-Token: "{{ os_auth_token }}"
-          Content-Type: "application/json"
-          Accept: "application/json"
-        body:
-          backup:
-            volume_id: "{{ volume_id }}"
-            name: "{{ final_backup_name }}"
-            description: "Backup automatico INCREMENTALE (parent: {{ last_backup_id[:8] }}) - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }} - {{ 'Volume ATTACHED (forced)' if backup_force_flag else 'Volume DETACHED' }}"
-            force: "{{ backup_force_flag }}"
-            incremental: true
-        body_format: json
-        validate_certs: no
-        status_code: [202]
-        timeout: 10
-      register: backup_create_response_incremental
-      when: is_incremental
-
-    - name: Set unified backup response
-      set_fact:
-        backup_create_response: "{{ backup_create_response_incremental if is_incremental else backup_create_response }}"
-    
-    - name: Extract backup ID
-      set_fact:
-        backup_id: "{{ backup_create_response.json.backup.id }}"
-    
-    - name: Display backup creation initiated
-      debug:
-        msg: "⏳ Backup avviato - ID: {{ backup_id }}"
-    
-    # =============================================
-    # 9. ATTENDI COMPLETAMENTO BACKUP
-    # =============================================
-    
-    - name: Wait for backup to complete
-      uri:
-        url: "{{ cinder_endpoint }}/backups/{{ backup_id }}"
+        url: "{{ cinder_endpoint }}/backups/{{ backup_create_response.json.backup.id }}"
         method: GET
-        headers:
-          X-Auth-Token: "{{ os_auth_token }}"
-          Accept: "application/json"
+        headers: { X-Auth-Token: "{{ os_auth_token }}" }
         validate_certs: no
-        status_code: [200]
-        timeout: 10
       register: backup_status_response
       until: backup_status_response.json.backup.status in ['available', 'error']
       retries: 60
       delay: 10
-    
-    - name: Check backup status
-      fail:
-        msg: " Backup failed with status: {{ backup_status_response.json.backup.status }}"
-      when: backup_status_response.json.backup.status == 'error'
-    
-    - name: Display backup creation success
-      debug:
-        msg: "✓ Backup creato con successo: {{ final_backup_name }}"
-    
-    # =============================================
-    # 10. GESTIONE RETENTION INTELLIGENTE
-    # Logica avanzata:
-    # 1. Massimo 3 backup padre mantenuti
-    # 2. Se esistono >= 3 backup padre, controlla il più vecchio
-    # 3. Se il padre più vecchio ha > 21 giorni, eliminalo (con tutti i figli)
-    # 4. Elimina comunque tutti i backup oltre 21 giorni
-    # =============================================
 
-    - name: Refresh all backups after new backup creation
+    - name: Final Check
+      fail: { msg: "Backup failed!" }
+      when: backup_status_response.json.backup.status == 'error'
+
+    # =============================================
+    # 10. GESTIONE RETENTION (MAX 3 PADRI)
+    # =============================================
+    - name: Refresh backups for retention
       uri:
         url: "{{ cinder_endpoint }}/backups/detail"
         method: GET
-        headers:
-          X-Auth-Token: "{{ os_auth_token }}"
-          Accept: "application/json"
+        headers: { X-Auth-Token: "{{ os_auth_token }}" }
         validate_certs: no
-        status_code: [200]
-        timeout: 10
-      register: all_backups_response_retention
+      register: final_bk_list
 
-    - name: Filter backups for this volume only
+    - name: Identify parents for cleanup
       set_fact:
-        volume_backups_retention: "{{ all_backups_response_retention.json.backups | selectattr('volume_id', 'equalto', volume_id) | selectattr('status', 'equalto', 'available') | list }}"
+        parents_retention: "{{ final_bk_list.json.backups | selectattr('volume_id', 'equalto', volume_id) | rejectattr('is_incremental', 'equalto', true) | sort(attribute='created_at') | list }}"
 
-    - name: Sort backups by creation date (oldest first for retention)
-      set_fact:
-        sorted_backups_retention: "{{ volume_backups_retention | sort(attribute='created_at') }}"
-
-    - name: Re-identify parent backups for retention
-      set_fact:
-        parent_backups_retention: "{{ sorted_backups_retention | selectattr('is_incremental', 'defined') | rejectattr('is_incremental', 'equalto', true) | list }}"
-
-    - name: Sort parent backups by creation date (oldest first)
-      set_fact:
-        sorted_parent_backups_retention: "{{ parent_backups_retention | sort(attribute='created_at') }}"
-
-    - name: Calculate 21-day timestamp threshold
-      set_fact:
-        max_retention_timestamp: "{{ (ansible_date_time.epoch | int - (retention_days | int * 86400)) }}"
-
-    - name: Initialize deletion lists
-      set_fact:
-        backups_to_delete: []
-        parent_to_delete_by_count: []
-        parent_to_delete_by_age: []
-
-    # =============================================
-    # 10.1 GESTIONE MASSIMO 3 BACKUP PADRE
-    # =============================================
-
-    - name: Check if we have more than 3 parent backups
-      set_fact:
-        has_too_many_parents: "{{ sorted_parent_backups_retention | length >= 3 }}"
-        oldest_parent: "{{ sorted_parent_backups_retention[0] if sorted_parent_backups_retention | length > 0 else None }}"
-
-    - name: Analyze oldest parent backup if limit exceeded
-      when:
-        - has_too_many_parents
-        - oldest_parent is not none
-      block:
-        - name: Calculate oldest parent age
-          set_fact:
-            oldest_parent_timestamp: "{{ (oldest_parent.created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
-
-        - name: Check if oldest parent is older than 21 days
-          set_fact:
-            oldest_parent_too_old: "{{ oldest_parent_timestamp | int < max_retention_timestamp | int }}"
-
-        - name: Mark oldest parent for deletion if too old
-          set_fact:
-            parent_to_delete_by_age: "{{ parent_to_delete_by_age + [oldest_parent] }}"
-          when: oldest_parent_too_old
-
-        - name: Display parent backup limit analysis
-          debug:
-            msg:
-              - "=============================================="
-              - "ANALISI LIMITE BACKUP PADRE (MAX 3)"
-              - "=============================================="
-              - "Backup padre totali: {{ sorted_parent_backups_retention | length }}"
-              - "Limite massimo: 3"
-              - "Backup padre più vecchio:"
-              - "  - Nome: {{ oldest_parent.name }}"
-              - "  - ID: {{ oldest_parent.id[:8] }}"
-              - "  - Data creazione: {{ oldest_parent.created_at }}"
-              - "  - Età: {{ ((ansible_date_time.epoch | int - oldest_parent_timestamp | int) / 86400) | int }} giorni"
-              - "  - Oltre 21 giorni: {{ 'SÌ - DA ELIMINARE' if oldest_parent_too_old else 'NO - MANTIENI' }}"
-              - "=============================================="
-
-    # =============================================
-    # 10.2 ELIMINA TUTTI I BACKUP OLTRE 21 GIORNI
-    # =============================================
-
-    - name: Identify all backups older than 21 days
-      set_fact:
-        backups_to_delete: "{{ backups_to_delete + [item] }}"
-      loop: "{{ sorted_backups_retention }}"
-      vars:
-        backup_timestamp: "{{ (item.created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
-      when:
-        - item.created_at is defined
-        - backup_timestamp | int < max_retention_timestamp | int
-
-    # =============================================
-    # 10.2.1 AL 21° GIORNO: ELIMINA PRIMA SETTIMANA (GIORNI 1-7)
-    # Quando raggiungiamo il 21° giorno di backup, eliminiamo tutta la prima settimana
-    # =============================================
-
-    - name: Calculate first week timestamp range (day 1-7 from oldest backup)
-      block:
-        - name: Get oldest backup timestamp
-          set_fact:
-            oldest_backup_timestamp: "{{ (sorted_backups_retention[0].created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
-          when: sorted_backups_retention | length > 0
-
-        - name: Calculate first week end timestamp (7 days after oldest)
-          set_fact:
-            first_week_end_timestamp: "{{ (oldest_backup_timestamp | int + (first_week_days | int * 86400)) }}"
-          when: oldest_backup_timestamp is defined
-
-        - name: Calculate backup age in days
-          set_fact:
-            backup_age_days: "{{ ((ansible_date_time.epoch | int - oldest_backup_timestamp | int) / 86400) | int }}"
-          when: oldest_backup_timestamp is defined
-
-        - name: Check if we reached day 21 (trigger first week cleanup)
-          set_fact:
-            trigger_first_week_cleanup: "{{ backup_age_days | int >= retention_days | int }}"
-          when: backup_age_days is defined
-
-        - name: Identify first week backups (days 1-7) for deletion
-          set_fact:
-            backups_to_delete: "{{ backups_to_delete + [item] }}"
-          loop: "{{ sorted_backups_retention }}"
-          vars:
-            backup_timestamp: "{{ (item.created_at | to_datetime('%Y-%m-%dT%H:%M:%S.%f')).strftime('%s') | int }}"
-          when:
-            - trigger_first_week_cleanup is defined
-            - trigger_first_week_cleanup | bool
-            - item.created_at is defined
-            - backup_timestamp | int <= first_week_end_timestamp | int
-            - item not in backups_to_delete
-
-        - name: Display first week cleanup info
-          debug:
-            msg:
-              - "=============================================="
-              - "PULIZIA PRIMA SETTIMANA (GIORNI 1-7)"
-              - "=============================================="
-              - "Età backup più vecchio: {{ backup_age_days }} giorni"
-              - "Soglia retention: {{ retention_days }} giorni"
-              - "Trigger pulizia prima settimana: {{ 'SÌ' if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 'NO' }}"
-              - "---"
-              - "Backup prima settimana identificati: {{ (backups_to_delete | selectattr('created_at', 'defined') | list | length) if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 0 }}"
-              - "=============================================="
-          when:
-            - backup_age_days is defined
-            - trigger_first_week_cleanup is defined
-      when: sorted_backups_retention | length > 0
-
-    # =============================================
-    # 10.3 SE CREIAMO FULL E ABBIAMO >= 3 PADRI, ELIMINA IL PIÙ VECCHIO
-    # =============================================
-
-    - name: Check if we need to delete oldest parent due to new full backup
-      when:
-        - not is_incremental
-        - not is_first_backup
-        - sorted_parent_backups_retention | length >= 3
-      block:
-        - name: Mark oldest parent for deletion (new full backup created)
-          set_fact:
-            parent_to_delete_by_count: "{{ parent_to_delete_by_count + [oldest_parent] }}"
-          when: oldest_parent is not none
-
-        - name: Get all children of oldest parent
-          set_fact:
-            oldest_parent_children: "{{ sorted_backups_retention | selectattr('parent_id', 'defined') | selectattr('parent_id', 'equalto', oldest_parent.id) | list }}"
-          when: oldest_parent is not none
-
-        - name: Add oldest parent and all children to deletion list
-          set_fact:
-            backups_to_delete: "{{ backups_to_delete + [oldest_parent] + oldest_parent_children }}"
-          when:
-            - oldest_parent is not none
-            - oldest_parent not in backups_to_delete
-
-        - name: Display deletion reason
-          debug:
-            msg:
-              - "=============================================="
-              - "ELIMINAZIONE BACKUP PADRE PIÙ VECCHIO"
-              - "=============================================="
-              - "Motivo: Nuovo backup FULL creato con >= 3 padri esistenti"
-              - "Backup padre da eliminare: {{ oldest_parent.name }}"
-              - "ID: {{ oldest_parent.id[:8] }}"
-              - "Figli da eliminare: {{ oldest_parent_children | length }}"
-              - "=============================================="
-          when: oldest_parent is not none
-
-    # =============================================
-    # 10.4 RIMUOVI DUPLICATI E MOSTRA RIEPILOGO
-    # =============================================
-
-    - name: Remove duplicate backups from deletion list
-      set_fact:
-        unique_backups_to_delete: "{{ backups_to_delete | unique | list }}"
-
-    - name: Separate deletion reasons for display
-      set_fact:
-        backups_deleted_by_age: "{{ unique_backups_to_delete | select('in', (sorted_backups_retention | selectattr('created_at', 'defined') | map(attribute='id') | map('extract', sorted_backups_retention) | selectattr('created_at', 'defined') | list)) | list }}"
-
-    - name: Display comprehensive retention summary
-      debug:
-        msg:
-          - "=============================================="
-          - "RETENTION POLICY - RIEPILOGO"
-          - "=============================================="
-          - "Retention massima: {{ retention_days }} giorni"
-          - "Limite backup padre: 3"
-          - "Pulizia prima settimana (giorni 1-7): {{ 'ATTIVA al giorno ' ~ retention_days if (trigger_first_week_cleanup is defined and trigger_first_week_cleanup) else 'Non ancora attiva' }}"
-          - "---"
-          - "Backup totali per questo volume: {{ volume_backups_retention | length }}"
-          - "Backup padre totali: {{ sorted_parent_backups_retention | length }}"
-          - "---"
-          - "Backup oltre {{ retention_days }} giorni: {{ (unique_backups_to_delete | length) }}"
-          - "Backup padre eliminati per limite (>= 3): {{ parent_to_delete_by_count | length }}"
-          - "Backup padre eliminati per età (> 21gg): {{ parent_to_delete_by_age | length }}"
-          - "---"
-          - "TOTALE backup da eliminare: {{ unique_backups_to_delete | length }}"
-          - "=============================================="
-
-    # =============================================
-    # 10.5 ESEGUI ELIMINAZIONE
-    # =============================================
-
-    - name: Delete backups via Cinder API
+    - name: Delete oldest parents if more than 3
       uri:
         url: "{{ cinder_endpoint }}/backups/{{ item.id }}"
         method: DELETE
-        headers:
-          X-Auth-Token: "{{ os_auth_token }}"
+        headers: { X-Auth-Token: "{{ os_auth_token }}" }
         validate_certs: no
-        status_code: [202, 404]
-        timeout: 10
-      loop: "{{ unique_backups_to_delete }}"
-      when: unique_backups_to_delete | length > 0
-      register: delete_results
-      ignore_errors: true
-
-    - name: Display deletion summary
-      debug:
-        msg:
-          - "Backup eliminati con successo: {{ delete_results.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 202) | list | length if delete_results.results is defined else 0 }}"
-          - "Backup già non esistenti: {{ delete_results.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 404) | list | length if delete_results.results is defined else 0 }}"
-      when: unique_backups_to_delete | length > 0
-    
-    # =============================================
-    # 11. SUMMARY
-    # =============================================
-
-    - name: Show success message
-      debug:
-        msg:
-          - "=============================================="
-          - "✓ BACKUP COMPLETATO CON SUCCESSO"
-          - "=============================================="
-          - "Backup Name: {{ final_backup_name }}"
-          - "Backup ID: {{ backup_id }}"
-          - "Backup Type: {{ 'INCREMENTALE' if is_incremental else 'FULL' }}"
-          - "{% if is_incremental and last_backup_id != '' %}Parent Backup ID: {{ last_backup_id[:8] }}{% endif %}"
-          - "{% if is_incremental and children_count is defined %}Figli del parent prima di questo: {{ children_count }}{% endif %}"
-          - "Volume: {{ volume_name }} ({{ volume_id }})"
-          - "Volume Status: {{ 'ATTACHED' if volume_is_attached else 'DETACHED' }}"
-          - "{% if volume_is_attached %}Attached to Instance: {{ volume_attachments[0].server_id if volume_attachments | length > 0 else 'N/A' }}{% endif %}"
-          - "Backup --force flag: {{ backup_force_flag }}"
-          - "Tenant: {{ tenant_name }}"
-          - "Status: {{ backup_status_response.json.backup.status }}"
-          - "---"
-          - "GESTIONE BACKUP PADRE/FIGLI:"
-          - "Backup padre attuali: {{ sorted_parent_backups_retention | length if sorted_parent_backups_retention is defined else 'N/A' }}"
-          - "Limite massimo backup padre: 3"
-          - "Backup totali per questo volume: {{ volume_backups_retention | length if volume_backups_retention is defined else 'N/A' }}"
-          - "Backup eliminati (retention): {{ unique_backups_to_delete | length if unique_backups_to_delete is defined else 0 }}"
-          - "---"
-          - "RETENTION POLICY:"
-          - "Massimo {{ retention_days }} giorni di retention"
-          - "Massimo 3 backup padre mantenuti"
-          - "Al giorno {{ retention_days }}: elimina prima settimana (giorni 1-{{ first_week_days }})"
-          - "Logica incrementale: < 6 figli -> incrementale, >= 6 figli -> full"
-          - "=============================================="
+        status_code: [204, 404]
+      loop: "{{ parents_retention[:-3] }}"
+      when: parents_retention | length > 3
