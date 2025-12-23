@@ -608,7 +608,7 @@
       register: backup_create_response
       when: not is_incremental
 
-    - name: Create INCREMENTAL volume backup with explicit parent via Cinder API
+    - name: Create INCREMENTAL volume backup via Cinder API
       uri:
         url: "{{ cinder_endpoint }}/backups"
         method: POST
@@ -623,7 +623,6 @@
             description: "Backup automatico INCREMENTALE (parent: {{ last_backup_id[:8] }}) - Retention {{ retention_days }}gg - Tenant: {{ tenant_name }} - {{ 'Volume ATTACHED (forced)' if backup_force_flag else 'Volume DETACHED' }}"
             force: "{{ backup_force_flag }}"
             incremental: true
-            parent_id: "{{ last_backup_id }}"
         body_format: json
         validate_certs: no
         status_code: [202]
