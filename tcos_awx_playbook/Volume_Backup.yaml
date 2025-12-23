@@ -474,12 +474,13 @@
       set_fact:
         parent_backups: []
 
-    - name: Identify parent backups (FULL backups = no parent_id)
+    - name: Identify parent backups (FULL backups = is_incremental false)
       set_fact:
         parent_backups: "{{ parent_backups + [item] }}"
       loop: "{{ sorted_existing_backups }}"
       when:
-        - item.parent_id is not defined or item.parent_id == None or item.parent_id == ''
+        - item.is_incremental is defined
+        - not (item.is_incremental | bool)
         - item.created_at is defined
 
     - name: Sort parent backups by creation date (newest first)
@@ -701,7 +702,7 @@
 
     - name: Re-identify parent backups for retention
       set_fact:
-        parent_backups_retention: "{{ sorted_backups_retention | selectattr('has_dependent_backups', 'defined') | selectattr('has_dependent_backups', 'equalto', true) | list }}"
+        parent_backups_retention: "{{ sorted_backups_retention | selectattr('is_incremental', 'defined') | rejectattr('is_incremental', 'equalto', true) | list }}"
 
     - name: Sort parent backups by creation date (oldest first)
       set_fact:
