@@ -15,7 +15,7 @@
   vars:
     awx_host: "https://services.linuxwall.it"
     awx_validate_certs: false
-    retention_days: 15
+    retention_days: 21
   vars_files:
     - vars/awx_credentials.yaml
   tasks:
