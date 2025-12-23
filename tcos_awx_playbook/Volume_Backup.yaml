@@ -508,7 +508,7 @@
 
     - name: Count children for each parent backup
       set_fact:
-        parent_with_children: "{{ parent_with_children + [{ 'parent': item, 'children_count': (sorted_existing_backups | selectattr('parent_id', 'defined') | selectattr('parent_id', 'equalto', item.id) | list | length) }] }}"
+        parent_with_children: "{{ parent_with_children + [{ 'parent': item, 'children_count': (sorted_existing_backups | selectattr('is_incremental', 'defined') | selectattr('is_incremental', 'equalto', true) | list | length) }] }}"
       loop: "{{ sorted_parent_backups }}"
 
     - name: Display parent-children relationships
