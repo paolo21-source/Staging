@@ -198,7 +198,7 @@
     
     - name: Extract Cinder endpoint from service catalog
       set_fact:
-        cinder_endpoint_original: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
+        cinder_endpoint: "{{ auth_response.json.token.catalog | selectattr('type', 'equalto', 'volumev3') | map(attribute='endpoints') | first | selectattr('interface', 'equalto', 'public') | map(attribute='url') | first }}"
         
     #- name: Fix Cinder endpoint to use correct IP
      # set_fact:
